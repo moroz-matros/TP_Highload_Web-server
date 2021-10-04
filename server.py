@@ -1,6 +1,7 @@
 import datetime
 import os
 import queue
+import signal
 import socket
 import urllib
 from functools import lru_cache
@@ -27,6 +28,9 @@ PORT = 80
 class MyHTTPServer:
     def __init__(self, host, port, threads, document_root):
         print("starting server...")
+
+        self._cpu_num = os.cpu_count()
+
         self._host = host
         self._port = port
         self._request_conns = queue.SimpleQueue()
@@ -34,19 +38,14 @@ class MyHTTPServer:
         self._lock = threading.Lock()
         self._DIR = document_root
         self._N = threads
+        self._cpu_pool = []
 
-        cid = 0
-        for i in range(self._N):
-            t = threading.Thread(target=self.thread_init, args=(cid,), daemon=True)
-            cid += 1
-            t.start()
         print("done")
 
     def thread_init(self, cid):
         while self._thread_live:
             conn = self._request_conns.get()
             if conn:
-                # print("Thread " + str(cid) + "got connection")
                 self.handle_request(conn)
                 conn.close()
 
@@ -83,7 +82,7 @@ class MyHTTPServer:
             # directory
             elif new_path[-1] == '/' and new_path.find('.') == -1:
                 try:
-                    new_path = new_path+'index.html'
+                    new_path = new_path + 'index.html'
                     file = open(self._DIR + new_path, 'rb')
                 except:
                     self.serve_no_index(conn)
@@ -98,7 +97,7 @@ class MyHTTPServer:
             else:
                 # file
                 try:
-                    file = open(self._DIR+new_path, 'rb')
+                    file = open(self._DIR + new_path, 'rb')
                 except:
                     self.serve_no_file(conn)
                     req.rfile.close()
@@ -122,13 +121,31 @@ class MyHTTPServer:
         try:
             serv_sock.bind((self._host, self._port))
             serv_sock.listen()
-
+            c_id = 0
+            cid = 0
+            print("initializing threads")
+            for i in range(self._cpu_num):
+                cid = os.fork()
+                for j in range(self._N):
+                    t = threading.Thread(target=self.thread_init, args=(c_id,), daemon=True)
+                    c_id += 1
+                    t.start()
+                if cid == 0:
+                    return
+                if cid != 0:
+                    self._cpu_pool.append(cid)
+            if cid == 0:
+                return
+            print("done")
             while True:
                 conn, _ = serv_sock.accept()
                 self._request_conns.put(conn)
-        finally:
+        except KeyboardInterrupt:
             serv_sock.close()
             self._thread_live = False
+            for pid in self._cpu_pool:
+                print("killing ", pid)
+                os.kill(pid, signal.SIGTERM)
             print("server down")
 
     def parse_request(self, conn):
@@ -245,6 +262,7 @@ class HTTPError(Exception):
         self.status = status
         self.reason = reason
         self.body = body
+
 
 def parse():
     threads = DEFAULT_THREAD_NUM
